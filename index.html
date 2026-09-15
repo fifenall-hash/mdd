@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MDD - 물림일수 분석 및 시뮬레이션</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 { text-align: center; color: #2c3e50; }
+        .card {
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        input[type="text"] {
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: 150px;
+            text-transform: uppercase;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #95a5a6; cursor: not-allowed; }
+        #status {
+            text-align: center;
+            font-weight: bold;
+            color: #e74c3c;
+            margin-bottom: 10px;
+        }
+        .results {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .result-box {
+            background: #ecf0f1;
+            padding: 15px;
+            border-radius: 6px;
+        }
+        .result-title {
+            font-size: 14px;
+            color: #7f8c8d;
+            margin-bottom: 5px;
+        }
+        .result-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        canvas {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>MDD & 물림일수 상관관계 분석기</h1>
+
+    <div class="card">
+        <div class="input-group">
+            <label for="ticker">종목 티커:</label>
+            <input type="text" id="ticker" value="SPY" placeholder="ex) SPY, QQQ">
+            <button id="runBtn" onclick="runAnalysis()">분석 및 시뮬레이션 실행</button>
+        </div>
+        <div id="status"></div>
+    </div>
+
+    <div class="card">
+        <h2>1. 데이터 분석 결과</h2>
+        <div class="results">
+            <div class="result-box">
+                <div class="result-title">MDD - 물림일수 상관관계 식 (Linear Regression)</div>
+                <div class="result-value" id="eqResult">-</div>
+            </div>
+            <div class="result-box">
+                <div class="result-title">설명력 (R² Score)</div>
+                <div class="result-value" id="r2Result">-</div>
+            </div>
+            <div class="result-box">
+                <div class="result-title">최대 물림일수 지점 (A 지점)</div>
+                <div class="result-value" id="aPointResult">-</div>
+            </div>
+            <div class="result-box">
+                <div class="result-title">마지막 하회 지점 (B 지점) / 유효기간 제외 길이</div>
+                <div class="result-value" id="bPointResult">-</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>2. 시뮬레이션 결과 (절반 지점 ~ 최신)</h2>
+        <div class="results">
+            <div class="result-box">
+                <div class="result-title">시뮬레이션 최종 자산가치</div>
+                <div class="result-value" id="finalAsset">-</div>
+            </div>
+            <div class="result-box">
+                <div class="result-title">총 투입 원금 (누적 입금액)</div>
+                <div class="result-value" id="totalInflow">-</div>
+            </div>
+        </div>
+        <canvas id="simChart" width="800" height="400"></canvas>
+    </div>
+
+    <script>
+        let chartInstance = null;
+
+        function setStatus(msg, isError = false) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = msg;
+            statusEl.style.color = isError ? '#e74c3c' : '#27ae60';
+        }
+
+        async function runAnalysis() {
+            const ticker = document.getElementById('ticker').value.trim().toUpperCase();
+            if(!ticker) {
+                alert("티커를 입력해주세요.");
+                return;
+            }
+
+            const btn = document.getElementById('runBtn');
+            btn.disabled = true;
+            setStatus("데이터를 불러오는 중입니다... (CORS 확장을 켜주세요)");
+
+            try {
+                // 1. 야후 파이낸스 데이터 패치
+                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=0&period2=9999999999&interval=1d`;
+                const response = await fetch(url);
+                if (!response.ok) throw new Error("데이터를 가져오는데 실패했습니다. 티커 오류 또는 CORS 문제를 확인해주세요.");
+                
+                const data = await response.json();
+                const timestamps = data.chart.result[0].timestamp;
+                const closePrices = data.chart.result[0].indicators.quote[0].close;
+
+                // null 데이터 제거 및 정제
+                let times = [];
+                let prices = [];
+                for(let i = 0; i < timestamps.length; i++) {
+                    if(closePrices[i] !== null && closePrices[i] !== undefined) {
+                        times.push(timestamps[i] * 1000);
+                        prices.push(closePrices[i]);
+                    }
+                }
+
+                const N = prices.length;
+                if(N < 200) throw new Error("데이터가 너무 짧습니다 (최소 200일 이상 필요).");
+
+                setStatus("물림일수를 계산하고 상관관계를 분석 중입니다...");
+                await new Promise(r => setTimeout(r, 10)); // UI 렌더링 양보
+
+                // 2. 물림일수 계산 및 A지점, B지점 탐색
+                let U = new Int32Array(N);
+                let maxU = -1;
+                let a_idx = -1;
+
+                for(let i = 0; i < N; i++) {
+                    let count = 0;
+                    let p_i = prices[i];
+                    for(let j = i + 1; j < N; j++) {
+                        if(prices[j] < p_i) count++;
+                    }
+                    U[i] = count;
+                    if(count > maxU) {
+                        maxU = count;
+                        a_idx = i;
+                    }
+                }
+
+                let b_idx = a_idx;
+                let targetP = prices[a_idx];
+                for(let j = N - 1; j > a_idx; j--) {
+                    if(prices[j] < targetP) {
+                        b_idx = j;
+                        break;
+                    }
+                }
+
+                let L = b_idx - a_idx;
+                let valid_end = (N - 1) - L;
+
+                // 3. MDD 계산 및 선형 회귀 분석 (유효구간 내)
+                let X = []; // MDD
+                let Y = []; // 물림일수
+                let maxP_so_far = 0;
+                let DD_full = new Float64Array(N);
+
+                for(let i = 0; i < N; i++) {
+                    if(prices[i] > maxP_so_far) maxP_so_far = prices[i];
+                    DD_full[i] = (maxP_so_far - prices[i]) / maxP_so_far * 100;
+                    
+                    if(i <= valid_end) {
+                        X.push(DD_full[i]);
+                        Y.push(U[i]);
+                    }
+                }
+
+                // 선형 회귀 공식 계산
+                let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0, sumYY = 0;
+                let vN = X.length;
+                for(let i = 0; i < vN; i++) {
+                    sumX += X[i];
+                    sumY += Y[i];
+                    sumXY += X[i] * Y[i];
+                    sumXX += X[i] * X[i];
+                    sumYY += Y[i] * Y[i];
+                }
+                
+                let meanX = sumX / vN;
+                let meanY = sumY / vN;
+                let ssXY = sumXY - vN * meanX * meanY;
+                let ssXX = sumXX - vN * meanX * meanX;
+                let ssYY = sumYY - vN * meanY * meanY;
+
+                let slope = ssXY / ssXX;
+                let intercept = meanY - slope * meanX;
+                let r2 = (ssXY * ssXY) / (ssXX * ssYY);
+
+                // UI 업데이트 (분석결과)
+                document.getElementById('eqResult').textContent = `y = ${slope.toFixed(2)}x + ${intercept.toFixed(2)}`;
+                document.getElementById('r2Result').textContent = r2.toFixed(4);
+                
+                const aDate = new Date(times[a_idx]).toISOString().split('T')[0];
+                const bDate = new Date(times[b_idx]).toISOString().split('T')[0];
+                document.getElementById('aPointResult').textContent = `${aDate} (물림 ${maxU}일)`;
+                document.getElementById('bPointResult').textContent = `${bDate} / 제외 길이: ${L}일`;
+
+                setStatus("워크포워드 최적화 백테스트를 진행 중입니다. 약 5~10초 정도 소요될 수 있습니다...");
+                await new Promise(r => setTimeout(r, 50)); 
+
+                // 4. 인플레이션 역산 입금액 계산
+                let Inflow = new Float64Array(N);
+                const latest_time = times[N - 1];
+                for(let i = 0; i < N; i++) {
+                    let days_diff = (latest_time - times[i]) / (1000 * 3600 * 24);
+                    Inflow[i] = 50 / Math.pow(1.025, days_diff / 365.25);
+                }
+
+                // 5. 워크포워드 시뮬레이션
+                const start_test_idx = Math.floor(N / 2);
+                let real_cash = 0;
+                let real_shares = 0;
+                let total_inflow_sum = 0;
+                
+                let chartDates = [];
+                let chartAssets = [];
+                let chartInflows = [];
+
+                // 최적화 함수
+                function optimize(train_end_idx) {
+                    let best_val = -1;
+                    let best_A = 0, best_B = 5, best_C = 0;
+                    
+                    // 학습구간 최대 MDD 계산
+                    let maxDD_train = 0;
+                    for(let i = 0; i < train_end_idx; i++) {
+                        if(DD_full[i] > maxDD_train) maxDD_train = DD_full[i];
+                    }
+                    let limit = Math.ceil(maxDD_train);
+
+                    for(let A = 0; A <= limit; A += 5) {
+                        for(let B = A + 5; B <= limit + 5; B += 5) {
+                            for(let C = 0; C <= 100; C += 5) {
+                                let c_ratio = C / 100;
+                                let sim_cash = 0;
+                                let sim_shares = 0;
+
+                                for(let t = 0; t < train_end_idx; t++) {
+                                    let p = prices[t];
+                                    let dd = DD_full[t];
+                                    let inf = Inflow[t];
+
+                                    if(dd < A) { // 매도
+                                        sim_cash += sim_shares * p + inf;
+                                        sim_shares = 0;
+                                    } else if(dd < B) { // 관망 (C% 매수)
+                                        let buy_amt = inf * c_ratio;
+                                        sim_shares += buy_amt / p;
+                                        sim_cash += inf - buy_amt;
+                                    } else { // 무조건 매수
+                                        sim_cash += inf;
+                                        sim_shares += sim_cash / p;
+                                        sim_cash = 0;
+                                    }
+                                }
+                                let val = sim_cash + sim_shares * prices[train_end_idx - 1];
+                                if(val > best_val) {
+                                    best_val = val;
+                                    best_A = A; best_B = B; best_C = C;
+                                }
+                            }
+                        }
+                    }
+                    return { A: best_A, B: best_B, C: best_C };
+                }
+
+                // 1달(약 21일) 간격으로 전진 분석(Walk-forward) 진행
+                for(let t = start_test_idx; t < N; ) {
+                    let params = optimize(t);
+                    let end_t = Math.min(t + 21, N);
+
+                    // 최적화된 파라미터로 다음 한 달 적용
+                    for(let i = t; i < end_t; i++) {
+                        let p = prices[i];
+                        let dd = DD_full[i];
+                        let inf = Inflow[i];
+                        
+                        total_inflow_sum += inf;
+
+                        if(dd < params.A) {
+                            real_cash += real_shares * p;
+                            real_shares = 0;
+                            real_cash += inf;
+                        } else if(dd < params.B) {
+                            let buy_amt = inf * (params.C / 100);
+                            real_shares += buy_amt / p;
+                            real_cash += inf - buy_amt;
+                        } else {
+                            real_cash += inf;
+                            real_shares += real_cash / p;
+                            real_cash = 0;
+                        }
+
+                        let pv = real_cash + real_shares * p;
+                        chartDates.push(new Date(times[i]).toISOString().split('T')[0]);
+                        chartAssets.push(pv);
+                        chartInflows.push(total_inflow_sum);
+                    }
+                    t = end_t;
+                }
+
+                // 결과 표시
+                document.getElementById('finalAsset').textContent = `$${chartAssets[chartAssets.length - 1].toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                document.getElementById('totalInflow').textContent = `$${total_inflow_sum.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+                // 6. 차트 그리기
+                const ctx = document.getElementById('simChart').getContext('2d');
+                if(chartInstance) chartInstance.destroy();
+                
+                chartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: chartDates,
+                        datasets: [
+                            {
+                                label: '전략 기반 포트폴리오 가치 ($)',
+                                data: chartAssets,
+                                borderColor: '#3498db',
+                                backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                fill: true
+                            },
+                            {
+                                label: '단순 누적 입금액 ($)',
+                                data: chartInflows,
+                                borderColor: '#95a5a6',
+                                borderDash: [5, 5],
+                                borderWidth: 2,
+                                pointRadius: 0,
+                                fill: false
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        interaction: {
+                            mode: 'index',
+                            intersect: false,
+                        },
+                        scales: {
+                            y: { beginAtZero: true }
+                        }
+                    }
+                });
+
+                setStatus("분석 및 백테스트가 완료되었습니다.");
+            } catch (error) {
+                setStatus(`오류 발생: ${error.message}`, true);
+                console.error(error);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
