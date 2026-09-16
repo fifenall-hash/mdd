@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MDD 전략 vs Buy&Hold (세금 및 절세매매 반영)</title>
+    <title>MDD×기간 지표 백테스트 (세금 및 절세매매 반영)</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8f9fa; color: #2c3e50; max-width: 1100px; margin: 0 auto; padding: 20px; }
@@ -29,7 +29,7 @@
 </head>
 <body>
 
-    <h1>동적 MDD 전략 vs B&H (세금/절세매매 정밀 백테스트)</h1>
+    <h1>(MDD × 전고점경과일) 전략 vs B&H</h1>
     <div class="subtitle">※ 전제조건: 매년 250만 원 비과세 공제 / 초과분 22% 과세 / 미달 시 즉시매도·재매수(절세매매) 적용 / 최종일 전량 매도 청산</div>
 
     <div class="card">
@@ -69,7 +69,7 @@
                 <div class="result-value" id="totalInflow">-</div>
             </div>
             <div class="result-box">
-                <div class="result-title">최근 1개월 최적화 A, B, C</div>
+                <div class="result-title">최근 적용 임계값 A</div>
                 <div class="result-value" id="latestParams">-</div>
             </div>
         </div>
@@ -77,15 +77,15 @@
             <canvas id="simChart" height="100"></canvas>
         </div>
         <div class="chart-container">
-            <canvas id="mddChart" height="100"></canvas>
+            <canvas id="metricChart" height="100"></canvas>
         </div>
     </div>
 
     <div class="card">
-        <h2>2. 데이터 분석 (물림일수 선형회귀)</h2>
+        <h2>2. 데이터 분석 (지표 선형회귀)</h2>
         <div class="results">
             <div class="result-box">
-                <div class="result-title">MDD-물림일수 관계식</div>
+                <div class="result-title">(MDD×경과일) - 물림일수 관계식</div>
                 <div class="result-value" id="eqResult">-</div>
             </div>
             <div class="result-box">
@@ -93,7 +93,7 @@
                 <div class="result-value" id="r2Result">-</div>
             </div>
             <div class="result-box">
-                <div class="result-title">최대 물림일수 지점 (A)</div>
+                <div class="result-title">최대 물림일수 발생일</div>
                 <div class="result-value" id="aPointResult">-</div>
             </div>
         </div>
@@ -101,9 +101,9 @@
 
     <script>
         let chartInstance = null;
-        let mddChartInstance = null;
+        let metricChartInstance = null;
 
-        // USD ↔ KRW 환산 상수 (단순 시뮬레이션용)
+        // USD ↔ KRW 환산 상수
         const EXCHANGE_RATE = 1300; 
         const TAX_ALLOWANCE_KRW = 2500000;
         const TAX_ALLOWANCE_USD = TAX_ALLOWANCE_KRW / EXCHANGE_RATE;
@@ -144,9 +144,10 @@
                 const N = prices.length;
                 if(N < 200) throw new Error("데이터가 부족합니다 (최소 200일).");
 
-                setStatus("물림일수 및 MDD 상관관계를 분석 중입니다...");
+                setStatus("(MDD × 전고점 경과일) 지표 계산 및 상관관계 분석 중...");
                 await new Promise(r => setTimeout(r, 10));
 
+                // 1. 물림일수 계산
                 let U = new Int32Array(N);
                 let maxU = -1, a_idx = -1;
 
@@ -159,40 +160,59 @@
                     if(count > maxU) { maxU = count; a_idx = i; }
                 }
 
+                // 2. 제외 길이(Valid End) 산정 (기존 로직 동일)
                 let b_idx = a_idx, targetP = prices[a_idx];
                 for(let j = N - 1; j > a_idx; j--) {
                     if(prices[j] < targetP) { b_idx = j; break; }
                 }
                 let valid_end = (N - 1) - (b_idx - a_idx);
 
-                let X = [], Y = [], maxP_so_far = 0, DD_full = new Float64Array(N);
+                // 3. 지표 산출 (MDD × 전고점으로부터의 기간)
+                let X = [], Y = [];
+                let maxP_so_far = 0;
+                let peak_time = times[0];
+                let Metric = new Float64Array(N);
+
                 for(let i = 0; i < N; i++) {
-                    if(prices[i] > maxP_so_far) maxP_so_far = prices[i];
-                    DD_full[i] = (maxP_so_far - prices[i]) / maxP_so_far * 100;
-                    if(i <= valid_end) { X.push(DD_full[i]); Y.push(U[i]); }
+                    if(prices[i] > maxP_so_far) {
+                        maxP_so_far = prices[i];
+                        peak_time = times[i];
+                    }
+                    
+                    let dd = (maxP_so_far - prices[i]) / maxP_so_far * 100;
+                    let days_from_peak = (times[i] - peak_time) / 86400000; // 밀리초를 일(Days)로 변환
+                    
+                    Metric[i] = dd * days_from_peak;
+
+                    // 유효 구간까지만 회귀분석 데이터에 삽입
+                    if(i <= valid_end) { 
+                        X.push(Metric[i]); 
+                        Y.push(U[i]); 
+                    }
                 }
 
+                // 회귀분석 계산
                 let sumX=0, sumY=0, sumXY=0, sumXX=0, sumYY=0, vN = X.length;
                 for(let i=0; i<vN; i++) { sumX+=X[i]; sumY+=Y[i]; sumXY+=X[i]*Y[i]; sumXX+=X[i]*X[i]; sumYY+=Y[i]*Y[i]; }
                 let meanX = sumX/vN, meanY = sumY/vN;
                 let ssXY = sumXY - vN*meanX*meanY, ssXX = sumXX - vN*meanX*meanX, ssYY = sumYY - vN*meanY*meanY;
                 let slope = ssXY/ssXX, intercept = meanY - slope*meanX, r2 = (ssXY*ssXY)/(ssXX*ssYY);
 
-                document.getElementById('eqResult').textContent = `y = ${slope.toFixed(2)}x + ${intercept.toFixed(2)}`;
+                document.getElementById('eqResult').textContent = `y = ${slope.toFixed(4)}x + ${intercept.toFixed(2)}`;
                 document.getElementById('r2Result').textContent = r2.toFixed(4);
                 document.getElementById('aPointResult').textContent = `${new Date(times[a_idx]).toISOString().split('T')[0]} (물림 ${maxU}일)`;
 
-                // 입금액 세팅 (최신 기준 $50 가치 역산, 약 6.5만원)
+                // 입금액 세팅 (최신 기준 $50 가치 역산, 2.5% 물가상승)
                 let Inflow = new Float64Array(N);
                 for(let i = 0; i < N; i++) {
                     let days_diff = (times[N - 1] - times[i]) / 86400000;
                     Inflow[i] = 50 / Math.pow(1.025, days_diff / 365.25);
                 }
 
-                setStatus("워크포워드 최적화 및 세금/절세매매 시뮬레이션 중... (최대 10초 소요)");
+                setStatus("워크포워드 최적화 및 세금/절세매매 시뮬레이션 중... (빠름)");
                 await new Promise(r => setTimeout(r, 50)); 
 
-                // 상태 관리 헬퍼 함수
+                // --- 세금 및 매매 헬퍼 함수 ---
                 function processYearEnd(state, price) {
                     if (state.realized_year < TAX_ALLOWANCE_USD) {
                         let allowanceLeft = TAX_ALLOWANCE_USD - state.realized_year;
@@ -229,54 +249,56 @@
                     state.cost = 0;
                 }
 
-                // -----------------------------------------------------------------
-                // 최적화 엔진 (학습 구간에서 세금효과 포함 가장 높은 자산을 만드는 ABC 찾기)
+                // --- 최적화 엔진 ---
+                // Metric이 A 이상일 때 전액 매수, 미만이면 관망
                 function optimize(train_end_idx) {
                     let best_val = -1;
-                    let best_A = 0, best_B = 5, best_C = 0;
-                    let limit = Math.ceil(Math.max(...DD_full.slice(0, train_end_idx)));
+                    let best_A = 0;
+                    
+                    let max_metric = 0;
+                    for(let i = 0; i < train_end_idx; i++) {
+                        if(Metric[i] > max_metric) max_metric = Metric[i];
+                    }
+                    
+                    // 0부터 최대지표값까지 약 200단계로 나누어 세밀하게 테스트
+                    let step = Math.max(0.1, max_metric / 200);
 
-                    for(let A = 0; A <= limit; A += 5) {
-                        for(let B = A + 5; B <= limit + 5; B += 5) {
-                            for(let C = 0; C <= 100; C += 5) {
-                                let st = { cash: 0, shares: 0, cost: 0, realized_year: 0, total_tax: 0 };
-                                let c_ratio = C / 100;
+                    for(let A = 0; A <= max_metric; A += step) {
+                        let st = { cash: 0, shares: 0, cost: 0, realized_year: 0, total_tax: 0 };
 
-                                for(let t = 0; t < train_end_idx; t++) {
-                                    let p = prices[t], dd = DD_full[t], inf = Inflow[t];
-                                    
-                                    st.cash += inf; // 입금
-                                    
-                                    if(dd < A) sellAll(st, p);
-                                    else if(dd < B) buy(st, inf * c_ratio, p);
-                                    else buy(st, st.cash, p); // 전액 매수
+                        for(let t = 0; t < train_end_idx; t++) {
+                            let p = prices[t], metric_val = Metric[t], inf = Inflow[t];
+                            
+                            st.cash += inf; // 입금
+                            
+                            // 조건 충족 시 전량 매수 (보유 현금을 털어서 모두 삼)
+                            if(metric_val >= A) {
+                                buy(st, st.cash, p); 
+                            }
 
-                                    if(t < train_end_idx - 1 && years[t] !== years[t+1]) {
-                                        processYearEnd(st, p);
-                                    }
-                                }
-                                // 학습 종료시 강제 전량 매도 및 과세하여 순수 평가액 비교
-                                sellAll(st, prices[train_end_idx - 1]);
-                                processYearEnd(st, prices[train_end_idx - 1]); // 가상의 연말 정산
-
-                                if(st.cash > best_val) {
-                                    best_val = st.cash; best_A = A; best_B = B; best_C = C;
-                                }
+                            if(t < train_end_idx - 1 && years[t] !== years[t+1]) {
+                                processYearEnd(st, p);
                             }
                         }
+                        sellAll(st, prices[train_end_idx - 1]);
+                        processYearEnd(st, prices[train_end_idx - 1]); 
+
+                        if(st.cash > best_val) {
+                            best_val = st.cash; 
+                            best_A = A;
+                        }
                     }
-                    return { A: best_A, B: best_B, C: best_C };
+                    return { A: best_A };
                 }
 
-                // -----------------------------------------------------------------
-                // 실제 워크포워드 시뮬레이션 적용
+                // --- 실제 워크포워드 시뮬레이션 적용 ---
                 const start_test_idx = Math.floor(N / 2);
                 let real_st = { cash: 0, shares: 0, cost: 0, realized_year: 0, total_tax: 0 };
                 let bh_st   = { cash: 0, shares: 0, cost: 0, realized_year: 0, total_tax: 0 };
                 let total_inflow_sum = 0;
                 
                 let chartDates = [], chartStrat = [], chartBH = [], chartInflows = [];
-                let chartMDD = [], chartA_line = [], chartB_line = [];
+                let chartMetricData = [], chartALine = [];
                 let last_params = null;
 
                 for(let t = start_test_idx; t < N; ) {
@@ -284,30 +306,28 @@
                     last_params = params;
                     let end_t = Math.min(t + 21, N); 
                     
-                    // UI 스레드 양보 (최적화가 무거우므로 브라우저 멈춤 방지)
                     await new Promise(r => setTimeout(r, 0));
 
                     for(let i = t; i < end_t; i++) {
-                        let p = prices[i], dd = DD_full[i], inf = Inflow[i];
+                        let p = prices[i], metric_val = Metric[i], inf = Inflow[i];
                         total_inflow_sum += inf;
 
-                        // B&H 실행 (항상 입금액 전액 매수)
+                        // B&H 실행 (항상 들어오자마자 전액 매수)
                         bh_st.cash += inf;
                         buy(bh_st, bh_st.cash, p);
 
-                        // 전략 실행
+                        // 전략 실행 (관망하며 현금을 쌓다가 지표가 A 이상일 때 전액 매수)
                         real_st.cash += inf;
-                        if(dd < params.A) sellAll(real_st, p);
-                        else if(dd < params.B) buy(real_st, inf * (params.C / 100), p);
-                        else buy(real_st, real_st.cash, p);
+                        if(metric_val >= params.A) {
+                            buy(real_st, real_st.cash, p);
+                        }
 
-                        // 연말 세금 정산 (해가 바뀔 때)
+                        // 연말 세금 정산
                         if(i < N - 1 && years[i] !== years[i+1]) {
                             processYearEnd(real_st, p);
                             processYearEnd(bh_st, p);
                         }
 
-                        // 차트 기록용 평가금액 (매도하지 않은 현재 자산 가치)
                         let val_strat = real_st.cash + (real_st.shares * p);
                         let val_bh = bh_st.cash + (bh_st.shares * p);
 
@@ -316,26 +336,21 @@
                         chartBH.push(val_bh);
                         chartInflows.push(total_inflow_sum);
                         
-                        chartMDD.push(-dd);
-                        chartA_line.push(-params.A);
-                        chartB_line.push(-params.B);
+                        chartMetricData.push(metric_val);
+                        chartALine.push(params.A);
                     }
                     t = end_t;
                 }
 
-                // -----------------------------------------------------------------
-                // 최종일 전량 매도 및 최종 세금 청산 (완전 현금화)
+                // 최종일 전량 매도 및 최종 세금 청산
                 let final_p = prices[N - 1];
                 sellAll(real_st, final_p);
                 sellAll(bh_st, final_p);
-                
-                // 남은 세금 강제 징수 (마지막 날이므로 250만 원 공제 적용 후 과세)
                 processYearEnd(real_st, final_p); 
                 processYearEnd(bh_st, final_p);
 
                 // 결과 출력
                 let ratio = (real_st.cash / bh_st.cash) * 100;
-                
                 const fmt = (val) => `$${val.toLocaleString(undefined, {minimumFractionDigits: 0, maximumFractionDigits: 0})}`;
 
                 document.getElementById('assetRatio').textContent = `${ratio.toFixed(2)}%`;
@@ -344,7 +359,7 @@
                 document.getElementById('taxStrat').textContent = fmt(real_st.total_tax);
                 document.getElementById('taxBH').textContent = fmt(bh_st.total_tax);
                 document.getElementById('totalInflow').textContent = fmt(total_inflow_sum);
-                document.getElementById('latestParams').textContent = `A: ${last_params.A}, B: ${last_params.B}, C: ${last_params.C}%`;
+                document.getElementById('latestParams').textContent = `${last_params.A.toFixed(1)}`;
 
                 // 자산 차트 렌더링
                 const ctx1 = document.getElementById('simChart').getContext('2d');
@@ -362,20 +377,23 @@
                     options: { responsive: true, interaction: { mode: 'index', intersect: false }, plugins: { title: { display: true, text: '포트폴리오 성장 추이 (세금 납부 후)' } } }
                 });
 
-                // MDD 차트 렌더링
-                const ctx2 = document.getElementById('mddChart').getContext('2d');
-                if(mddChartInstance) mddChartInstance.destroy();
-                mddChartInstance = new Chart(ctx2, {
+                // 지표(Metric) 및 A 임계선 차트 렌더링
+                const ctx2 = document.getElementById('metricChart').getContext('2d');
+                if(metricChartInstance) metricChartInstance.destroy();
+                metricChartInstance = new Chart(ctx2, {
                     type: 'line',
                     data: {
                         labels: chartDates,
                         datasets: [
-                            { label: 'MDD (%)', data: chartMDD, borderColor: '#3498db', backgroundColor: 'rgba(52, 152, 219, 0.2)', borderWidth: 1, pointRadius: 0, fill: true },
-                            { label: 'A 경계선 (전량매도)', data: chartA_line, borderColor: '#e67e22', borderWidth: 2, borderDash: [3, 3], pointRadius: 0, stepped: true, fill: false },
-                            { label: 'B 경계선 (전량매수)', data: chartB_line, borderColor: '#27ae60', borderWidth: 2, borderDash: [3, 3], pointRadius: 0, stepped: true, fill: false }
+                            { label: 'MDD × 경과일', data: chartMetricData, borderColor: '#3498db', backgroundColor: 'rgba(52, 152, 219, 0.2)', borderWidth: 1, pointRadius: 0, fill: true },
+                            { label: '매수 임계선 (A)', data: chartALine, borderColor: '#e67e22', borderWidth: 2, borderDash: [3, 3], pointRadius: 0, stepped: true, fill: false }
                         ]
                     },
-                    options: { responsive: true, interaction: { mode: 'index', intersect: false }, plugins: { title: { display: true, text: '동적 워크포워드 A/B 파라미터 변화' } }, scales: { y: { max: 0 } } }
+                    options: { 
+                        responsive: true, 
+                        interaction: { mode: 'index', intersect: false }, 
+                        plugins: { title: { display: true, text: 'MDD × 전고점 경과일 추이 및 매수 임계선(A)' } }
+                    }
                 });
 
                 setStatus("정밀 백테스트가 완료되었습니다.");
